@@ -9,6 +9,35 @@ import type {
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 
 /**
+ * Flatten a FastAPI error envelope into a human-readable string.
+ *
+ * On 4xx/5xx responses the body shape is one of:
+ *   - { detail: "some string" }                       (HTTPException-raised)
+ *   - { detail: [{loc, msg, type, input?}, ...] }     (Pydantic 422)
+ *   - anything else / parse failure                   (fallback to status)
+ *
+ * The legacy code did `err.detail || ...`, which for the array form
+ * stringified to "[object Object],[object Object]" — useless to the user.
+ * This helper renders each Pydantic error as `<field>: <msg>` joined by
+ * "; " so the form alert banner shows actionable, field-level guidance
+ * (e.g. "patient_dob: must not be in the future; diagnosis_codes.0:
+ * invalid ICD-10 ...").
+ */
+function formatApiError(payload: unknown, status: number): string {
+  const detail = (payload as { detail?: unknown } | null | undefined)?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((e: { loc?: unknown; msg?: unknown }) => {
+      const loc = Array.isArray(e?.loc) ? e.loc.slice(1).join(".") : "request";
+      const msg = typeof e?.msg === "string" ? e.msg : "invalid value";
+      return `${loc}: ${msg}`;
+    });
+    if (parts.length) return parts.join("; ");
+  }
+  return `Request failed (${status})`;
+}
+
+/**
  * Submit a prior auth review with real-time SSE progress streaming.
  * Returns an AbortController so the caller can cancel the request.
  */
@@ -31,7 +60,7 @@ export function submitReviewStream(
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        onError(err.detail || `Review failed (${response.status})`);
+        onError(formatApiError(err, response.status));
         return;
       }
 
@@ -114,7 +143,7 @@ export async function submitDecision(
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `Decision failed (${response.status})`);
+    throw new Error(formatApiError(error, response.status));
   }
 
   return response.json();

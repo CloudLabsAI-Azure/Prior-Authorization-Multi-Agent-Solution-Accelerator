@@ -77,12 +77,53 @@ useful for programmatic/API integrations that don't need progress updates.
 }
 ```
 
+**Validation rules** (enforced by Pydantic at request-binding time, before the orchestrator runs — see issue #28):
+
+| Field | Rule |
+|---|---|
+| `patient_dob` | Must match `YYYY-MM-DD`, parse as a real calendar date (e.g. `2026-02-30` is rejected), and be `≤ today` (no future DOBs). |
+| `diagnosis_codes` | At least one non-blank entry required. Each item is trimmed + uppercased, then matched against `^[A-TV-Z][0-9][A-Z0-9](?:\.[A-Z0-9]{1,4})?$` (ICD-10; U-prefix is reserved by WHO and rejected). |
+| `procedure_codes` | At least one non-blank entry required. Each item is trimmed + uppercased, then matched against `^([0-9]{4}[0-9A-Z]\|[A-Z][0-9]{4})$` (CPT 5-digit, CPT Cat-III, or HCPCS Level II). |
+
+Codes are normalized server-side (`r91.1` → `R91.1`, `" 27447 "` → `"27447"`) before being passed to the agents.
+
+**Error responses:**
+
+- `422 Unprocessable Entity` — One or more fields failed validation. The response body uses FastAPI's standard envelope:
+
+  ```json
+  HTTP/1.1 422 Unprocessable Entity
+  Content-Type: application/json
+
+  {
+    "detail": [
+      {
+        "type": "value_error",
+        "loc": ["body", "patient_dob"],
+        "msg": "Value error, patient_dob must not be in the future",
+        "input": "2043-01-01"
+      },
+      {
+        "type": "value_error",
+        "loc": ["body", "diagnosis_codes"],
+        "msg": "Value error, invalid ICD-10 diagnosis code: 'NOT-A-CODE' (expected format e.g. R91.1, M17.11, J18.9)",
+        "input": ["NOT-A-CODE"]
+      }
+    ]
+  }
+  ```
+
+  When the API returns 422, the multi-agent pipeline is **not** invoked — Hosted Agent V2 capacity is only consumed by structurally valid requests.
+
+- `500 Internal Server Error` — Multi-agent review failed (e.g., transient Foundry outage, MCP gateway timeout). Body: `{"detail": "Multi-agent review failed: ..."}`.
+
 ---
 
 ## `POST /api/review/stream`
 
 Submit a prior authorization request with **real-time SSE progress streaming**.
-Same request body as `POST /api/review`. Returns `text/event-stream`.
+Same request body, **same validation rules**, and same `422` error envelope as
+`POST /api/review`. Returns `text/event-stream`.
 
 The frontend uses `fetch` + `ReadableStream` (not `EventSource`, which only
 supports GET) to consume this endpoint.
@@ -243,7 +284,7 @@ All per-agent responses share a common envelope:
 
 Run the **Clinical Reviewer Agent** in isolation. Returns diagnosis validation, clinical extraction, literature support, clinical trials, and clinical summary.
 
-**Request body:** Same `PriorAuthRequest` as `POST /api/review`.
+**Request body:** Same `PriorAuthRequest` as `POST /api/review` (same validation rules; returns `422` on invalid input without invoking the agent).
 
 **Response `result`:** Same structure as `agent_results.clinical` in the full review response.
 
@@ -253,7 +294,7 @@ Run the **Clinical Reviewer Agent** in isolation. Returns diagnosis validation, 
 
 Run the **Compliance Validation Agent** in isolation. Returns the compliance checklist, documentation status, and missing items.
 
-**Request body:** Same `PriorAuthRequest` as `POST /api/review`.
+**Request body:** Same `PriorAuthRequest` as `POST /api/review` (same validation rules; returns `422` on invalid input without invoking the agent).
 
 **Response `result`:** Same structure as `agent_results.compliance` in the full review response.
 
@@ -261,7 +302,7 @@ Run the **Compliance Validation Agent** in isolation. Returns the compliance che
 
 ### `POST /api/agents/coverage`
 
-Run the **Coverage Assessment Agent** in isolation. Requires clinical findings from a prior Clinical Agent run (or test fixtures).
+Run the **Coverage Assessment Agent** in isolation. Requires clinical findings from a prior Clinical Agent run (or test fixtures). The nested `request` object is validated under the same rules as `POST /api/review` (returns `422` on invalid input without invoking the agent).
 
 **Request body:**
 
@@ -289,7 +330,7 @@ Run the **Coverage Assessment Agent** in isolation. Requires clinical findings f
 
 ### `POST /api/agents/synthesis`
 
-Run the **Synthesis Decision Agent** in isolation. Requires all three upstream agent results (or test fixtures).
+Run the **Synthesis Decision Agent** in isolation. Requires all three upstream agent results (or test fixtures). The nested `request` object is validated under the same rules as `POST /api/review` (returns `422` on invalid input without invoking the agent).
 
 **Request body:**
 

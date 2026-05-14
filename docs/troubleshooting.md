@@ -1,5 +1,50 @@
 # Troubleshooting
 
+## `POST /api/review` returns `422 Unprocessable Entity`
+
+The API rejected the request before the multi-agent pipeline ran (issue #28).
+This is the canonical FastAPI/Pydantic validation envelope and means **no
+Hosted Agent V2 capacity was consumed** — the request never reached the
+orchestrator.
+
+**Response body shape:**
+
+```json
+{
+  "detail": [
+    {
+      "type": "value_error",
+      "loc": ["body", "<field>"],
+      "msg": "Value error, <human-readable reason>",
+      "input": "<offending value>"
+    }
+  ]
+}
+```
+
+**Common causes and fixes:**
+
+| `loc` field | Likely `msg` | Fix |
+|---|---|---|
+| `body.patient_dob` | `must be a valid past date in YYYY-MM-DD format` | Send DOB as ISO date, e.g. `1958-03-15`. Free-text and `MM-DD-YYYY` are rejected. |
+| `body.patient_dob` | `must not be in the future` | DOB cannot be later than today. |
+| `body.diagnosis_codes` | `at least one diagnosis_code is required` | Send a non-empty array; entries that are blank/whitespace-only are dropped before the count check. |
+| `body.diagnosis_codes` | `invalid ICD-10 diagnosis code: '<code>'` | Use ICD-10 format, e.g. `R91.1`, `M17.11`, `J18.9`. U-prefix codes (e.g. `U07.1`) are reserved by WHO and rejected. |
+| `body.procedure_codes` | `at least one procedure_code is required` | Send a non-empty array. |
+| `body.procedure_codes` | `invalid CPT/HCPCS procedure code: '<code>'` | Use 5-digit CPT (`27447`, `31628`), CPT Cat-III (`0028T`), or HCPCS Level II (`J3490`). |
+
+The same rules apply to `POST /api/review/stream` and the four
+`POST /api/agents/*` endpoints (which nest `PriorAuthRequest`).
+
+The frontend `UploadForm` mirrors these rules with HTML5 `pattern`/`max`
+attributes and a pre-submit guard, then renders the backend's
+`detail[].msg` strings in the destructive `<Alert>` banner. If you see a
+422 in the browser console but no banner update, check that
+`frontend/lib/api.ts` is on the version that includes the `formatApiError`
+helper.
+
+---
+
 ## MAF Agent Fails to Start / "Failed to acquire Foundry auth token"
 
 The backend logs show an auth error when trying to invoke a hosted agent.

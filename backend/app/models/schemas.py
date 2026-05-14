@@ -1,14 +1,89 @@
-from pydantic import BaseModel
+import re
+from datetime import date
+
+from pydantic import BaseModel, Field, field_validator
+
+# ---------------------------------------------------------------------------
+# Request-validation regex (issue #28)
+# ---------------------------------------------------------------------------
+# Enforced by `PriorAuthRequest` field validators below so that FastAPI
+# returns HTTP 422 at request-binding time, BEFORE the orchestrator (and
+# therefore Hosted Agent V2) is ever invoked. This protects the model
+# capacity budget from malformed or clinically impossible inputs.
+#
+# DOB:  ISO date (YYYY-MM-DD); additionally parsed with date.fromisoformat()
+#       to reject impossible calendar dates (e.g. 2026-02-30) and compared
+#       against today() to reject future DOBs.
+#
+# ICD-10: First char A-T or V-Z (U-prefix is reserved by WHO for emergency
+#       codes such as U07.1 COVID; not accepted on PA submissions), then
+#       digit, then alphanumeric, optional decimal + 1-4 alphanumerics.
+#       Matches: R91.1, J18.9, M17.11, M17, J3490 (no — that's HCPCS).
+#
+# CPT/HCPCS: Two alternations:
+#       - 4 digits + (digit|letter)  → CPT (27447) and CPT Cat-III (0028T)
+#       - Letter + 4 digits          → HCPCS Level II (J3490)
+_DOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ICD10_RE = re.compile(r"^[A-TV-Z][0-9][A-Z0-9](?:\.[A-Z0-9]{1,4})?$")
+_CPT_HCPCS_RE = re.compile(r"^([0-9]{4}[0-9A-Z]|[A-Z][0-9]{4})$")
 
 
 class PriorAuthRequest(BaseModel):
     patient_name: str
     patient_dob: str
     provider_npi: str
-    diagnosis_codes: list[str]  # ICD-10 codes
-    procedure_codes: list[str]  # CPT codes
+    diagnosis_codes: list[str] = Field(min_length=1)  # ICD-10 codes
+    procedure_codes: list[str] = Field(min_length=1)  # CPT/HCPCS codes
     clinical_notes: str
     insurance_id: str | None = None
+
+    @field_validator("patient_dob", mode="after")
+    @classmethod
+    def _validate_dob(cls, v: str) -> str:
+        v = v.strip()
+        if not _DOB_RE.match(v):
+            raise ValueError(
+                "patient_dob must be a valid past date in YYYY-MM-DD format"
+            )
+        try:
+            parsed = date.fromisoformat(v)
+        except ValueError as exc:
+            raise ValueError(
+                "patient_dob must be a valid past date in YYYY-MM-DD format"
+            ) from exc
+        if parsed > date.today():
+            raise ValueError("patient_dob must not be in the future")
+        return v
+
+    @field_validator("diagnosis_codes", mode="after")
+    @classmethod
+    def _validate_diagnosis_codes(cls, v: list[str]) -> list[str]:
+        # Trim + uppercase, drop empties (frontend "Add Code" UI artifacts).
+        cleaned = [c.strip().upper() for c in v if c and c.strip()]
+        if not cleaned:
+            raise ValueError("at least one diagnosis_code is required")
+        for code in cleaned:
+            if not _ICD10_RE.match(code):
+                raise ValueError(
+                    f"invalid ICD-10 diagnosis code: {code!r} "
+                    "(expected format e.g. R91.1, M17.11, J18.9)"
+                )
+        return cleaned
+
+    @field_validator("procedure_codes", mode="after")
+    @classmethod
+    def _validate_procedure_codes(cls, v: list[str]) -> list[str]:
+        # Trim + uppercase, drop empties (frontend "Add Code" UI artifacts).
+        cleaned = [c.strip().upper() for c in v if c and c.strip()]
+        if not cleaned:
+            raise ValueError("at least one procedure_code is required")
+        for code in cleaned:
+            if not _CPT_HCPCS_RE.match(code):
+                raise ValueError(
+                    f"invalid CPT/HCPCS procedure code: {code!r} "
+                    "(expected format e.g. 27447, 31628, J3490, 0028T)"
+                )
+        return cleaned
 
 
 class ToolResult(BaseModel):

@@ -106,15 +106,35 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
     setError(null);
-    setProgress(initialProgress);
 
     const cleaned: PriorAuthRequest = {
       ...form,
-      diagnosis_codes: form.diagnosis_codes.filter((c) => c.trim()),
-      procedure_codes: form.procedure_codes.filter((c) => c.trim()),
+      diagnosis_codes: form.diagnosis_codes
+        .map((c) => c.trim().toUpperCase())
+        .filter((c) => c),
+      procedure_codes: form.procedure_codes
+        .map((c) => c.trim().toUpperCase())
+        .filter((c) => c),
     };
+
+    // Pre-submit guards mirror backend Pydantic validators (issue #28)
+    // so an obviously invalid form never burns a backend round-trip.
+    if (cleaned.diagnosis_codes.length === 0) {
+      setError("Add at least one diagnosis code (ICD-10).");
+      return;
+    }
+    if (cleaned.procedure_codes.length === 0) {
+      setError("Add at least one procedure code (CPT/HCPCS).");
+      return;
+    }
+    if (cleaned.patient_dob && cleaned.patient_dob > new Date().toISOString().slice(0, 10)) {
+      setError("Date of birth cannot be in the future.");
+      return;
+    }
+
+    setLoading(true);
+    setProgress(initialProgress);
 
     abortRef.current = submitReviewStream(
       cleaned,
@@ -184,6 +204,7 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
                 id="patient_dob"
                 type="date"
                 value={form.patient_dob}
+                max={new Date().toISOString().slice(0, 10)}
                 onChange={(e) => updateField("patient_dob", e.target.value)}
                 required
               />
@@ -238,6 +259,9 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
                   <Input
                     placeholder="e.g. R91.1"
                     value={code}
+                    pattern="^[A-Ta-tV-Zv-z][0-9][A-Za-z0-9](?:\.[A-Za-z0-9]{1,4})?$"
+                    title="ICD-10 format, e.g. R91.1, M17.11, J18.9"
+                    required={i === 0}
                     onChange={(e) =>
                       updateCode("diagnosis_codes", i, e.target.value)
                     }
@@ -276,6 +300,9 @@ export function UploadForm({ onReviewComplete }: UploadFormProps) {
                   <Input
                     placeholder="e.g. 31628"
                     value={code}
+                    pattern="^([0-9]{4}[0-9A-Za-z]|[A-Za-z][0-9]{4})$"
+                    title="CPT/HCPCS format, e.g. 27447, 31628, J3490, 0028T"
+                    required={i === 0}
                     onChange={(e) =>
                       updateCode("procedure_codes", i, e.target.value)
                     }
